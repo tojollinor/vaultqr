@@ -4,6 +4,8 @@ services:
     container_name: vaultqr
     restart: unless-stopped
     environment:
+    ports:
+      - "8010:8080"
 
       # Interner HTTP-Port im Container
       # PORT: "8080"
@@ -26,10 +28,6 @@ services:
       # normal = Requests, Statuscodes, Dauer, Größe und Modus
       # debug  = zusätzlich QR-Inhalt bis maximal 500 Zeichen
       # LOG_LEVEL: "normal"
-
-    ports:
-      # Host-Port 8010 wird auf Container-Port 8080 weitergeleitet
-      - "8010:8080"
 
     # Optionale Sicherheitshärtung
     # Diese Einstellungen werden von VaultQR nicht zwingend benötigt,
