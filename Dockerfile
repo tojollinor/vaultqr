@@ -2,10 +2,10 @@ FROM golang:1.24-alpine AS build
 
 WORKDIR /src
 
-COPY go.mod go.sum ./
-RUN go mod download
-
+COPY go.mod ./
 COPY cmd ./cmd
+
+RUN go mod tidy
 
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -trimpath \
