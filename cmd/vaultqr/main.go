@@ -4,7 +4,6 @@ package main
 import (
 	"crypto/rand"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"html/template"
@@ -44,7 +43,7 @@ type store struct {
 type pageData struct {
 	Content  string
 	ShowText bool
-	Image    template.URL
+	Image    string
 	Size     int
 }
 
@@ -139,7 +138,7 @@ var page = template.Must(template.New("page").Parse(`<!doctype html>
 		<h1>VaultQR</h1>
 
 		<div class="qr-wrap">
-			<img id="qr" src="{{.Image}}" alt="QR-Code">
+			<img id="qr" src="image" alt="QR-Code">
 		</div>
 
 		{{if .ShowText}}
@@ -149,7 +148,7 @@ var page = template.Must(template.New("page").Parse(`<!doctype html>
 
 		<div class="actions">
 			{{if .ShowText}}<button id="copy" type="button">Text kopieren</button>{{end}}
-			<a class="button" href="{{.Image}}" download="vaultqr.png">PNG speichern</a>
+			<a class="button" href="image?download=1">PNG speichern</a>
 		</div>
 		<div class="status" id="status" aria-live="polite"></div>
 	</main>
@@ -229,6 +228,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", createHandler(cfg, s))
 	mux.HandleFunc("/view", viewHandler(cfg, s))
+	mux.HandleFunc("/image", imageHandler(s))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
@@ -246,7 +246,7 @@ func main() {
 
 	log.Printf("START version=2 port=%s size=%d max_size=%d session_ttl=%s secret_enabled=%t",
 		cfg.Port, cfg.DefaultSize, cfg.MaxSize, cfg.SessionTTL, cfg.Secret != "")
-	log.Printf("ROUTES create=/ view=/view health=/healthz")
+	log.Printf("ROUTES create=/ view=/view image=/image health=/healthz")
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
@@ -309,7 +309,7 @@ func createHandler(cfg config, s *store) http.HandlerFunc {
 		query := r.URL.Query()
 		if len(query) == 0 {
 			log.Printf("CREATE rejected reason=no_query")
-			http.Redirect(w, r, "/view", http.StatusSeeOther)
+			http.Redirect(w, r, "view", http.StatusSeeOther)
 			return
 		}
 
@@ -379,7 +379,7 @@ func createHandler(cfg config, s *store) http.HandlerFunc {
 			SameSite: http.SameSiteStrictMode,
 		})
 
-		http.Redirect(w, r, "/view", http.StatusSeeOther)
+		http.Redirect(w, r, "view", http.StatusSeeOther)
 	}
 }
 
@@ -411,32 +411,68 @@ func viewHandler(_ config, s *store) http.HandlerFunc {
 		log.Printf("VIEW rendering mode=%s size=%d content_length=%d expires_in=%s",
 			mode, entry.Size, len(entry.Content), time.Until(entry.Expires).Round(time.Second))
 
-		png, err := qrcode.Encode(entry.Content, qrcode.Medium, entry.Size)
-		if err != nil {
-			http.Error(w, "QR-Code konnte nicht erzeugt werden", http.StatusInternalServerError)
-			log.Printf("QR-Erzeugung fehlgeschlagen: %v", err)
-			return
-		}
-
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Content-Security-Policy",
-			"default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'")
+			"default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'")
 
 		data := pageData{
 			Content:  entry.Content,
 			ShowText: entry.ShowText,
-			Image: template.URL(
-			    "data:image/png;base64," +
-			        base64.StdEncoding.EncodeToString(png),
-	                ),
+			Image:    "data:image/png;base64," + base64.StdEncoding.EncodeToString(png),
 			Size:     entry.Size,
 		}
 		if err := page.Execute(w, data); err != nil {
 			log.Printf("Template-Ausgabe fehlgeschlagen: %v", err)
+		}
+	}
+}
+
+
+func imageHandler(s *store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie("vaultqr_session")
+		if err != nil {
+			log.Printf("IMAGE rejected reason=missing_session_cookie")
+			http.Error(w, "Kein gültiger QR-Code-Aufruf vorhanden", http.StatusBadRequest)
+			return
+		}
+
+		entry, ok := s.get(cookie.Value)
+		if !ok {
+			log.Printf("IMAGE rejected reason=session_not_found")
+			http.Error(w, "QR-Code-Sitzung ist ungültig", http.StatusGone)
+			return
+		}
+		if time.Now().After(entry.Expires) {
+			log.Printf("IMAGE rejected reason=session_expired")
+			http.Error(w, "QR-Code-Sitzung ist abgelaufen", http.StatusGone)
+			return
+		}
+
+		png, err := qrcode.Encode(entry.Content, qrcode.Medium, entry.Size)
+		if err != nil {
+			log.Printf("IMAGE failed reason=qr_encode error=%q", err)
+			http.Error(w, "QR-Code konnte nicht erzeugt werden", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if r.URL.Query().Get("download") == "1" {
+			w.Header().Set("Content-Disposition", `attachment; filename="vaultqr.png"`)
+		}
+
+		log.Printf("IMAGE served size=%d bytes=%d download=%t",
+			entry.Size, len(png), r.URL.Query().Get("download") == "1")
+
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write(png); err != nil {
+			log.Printf("IMAGE write_failed error=%q", err)
 		}
 	}
 }
