@@ -371,6 +371,11 @@ func envInt(name string, fallback int) int {
 	return n
 }
 
+func redirectRelative(w http.ResponseWriter, target string) {
+	w.Header().Set("Location", target)
+	w.WriteHeader(http.StatusSeeOther)
+}
+
 func createHandler(cfg config, s *store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -381,7 +386,7 @@ func createHandler(cfg config, s *store) http.HandlerFunc {
 		query := r.URL.Query()
 		if len(query) == 0 {
 			logErrorf("CREATE rejected reason=no_query")
-			http.Redirect(w, r, "view", http.StatusSeeOther)
+			redirectRelative(w, "view")
 			return
 		}
 
@@ -452,7 +457,7 @@ func createHandler(cfg config, s *store) http.HandlerFunc {
 			SameSite: http.SameSiteStrictMode,
 		})
 
-		http.Redirect(w, r, "view", http.StatusSeeOther)
+		redirectRelative(w, "view")
 	}
 }
 
