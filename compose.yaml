@@ -3,24 +3,52 @@ services:
     image: ghcr.io/tojollinor/vaultqr:latest
     container_name: vaultqr
     restart: unless-stopped
-
     environment:
-      PORT: "8080"
-      SIZE: "400"
-      MAX_SIZE: "1024"
-      SESSION_TTL_MINUTES: "30"
-      SECRET: ""
-      LOG_LEVEL: "normal"
+
+      # Interner HTTP-Port im Container
+      # PORT: "8080"
+
+      # Standardgröße des QR-Codes, falls kein &size= übergeben wird
+      # SIZE: "400"
+
+      # Maximal erlaubte QR-Code-Größe
+      # MAX_SIZE: "1024"
+
+      # Gültigkeitsdauer der neutralen /view-Seite in Minuten
+      # SESSION_TTL_MINUTES: "30"
+
+      # Optionaler Zugriffsschutz
+      # Leer lassen, wenn kein Secret benötigt wird
+      # SECRET: ""
+
+      # Logging:
+      # off    = nur Startmeldungen und Fehler
+      # normal = Requests, Statuscodes, Dauer, Größe und Modus
+      # debug  = zusätzlich QR-Inhalt bis maximal 500 Zeichen
+      # LOG_LEVEL: "normal"
 
     ports:
+      # Host-Port 8010 wird auf Container-Port 8080 weitergeleitet
       - "8010:8080"
 
-    security_opt:
-      - no-new-privileges:true
+    # Optionale Sicherheitshärtung
+    # Diese Einstellungen werden von VaultQR nicht zwingend benötigt,
+    # funktionieren mit dem aktuellen Container aber problemlos.
 
-    cap_drop:
-      - ALL
+    # Verhindert, dass der Prozess zusätzliche Rechte erhält
+    # security_opt:
+      # - no-new-privileges:true
 
-    read_only: true
-    mem_limit: 64m
-    pids_limit: 100
+    # VaultQR benötigt keine Linux-Capabilities
+    # cap_drop:
+      # - ALL
+
+    # Container-Dateisystem schreibgeschützt betreiben
+    # Sessions liegen ausschließlich im Arbeitsspeicher
+    # read_only: true
+
+    # Maximale RAM-Nutzung
+    # mem_limit: 64m
+
+    # Maximale Anzahl an Prozessen
+    # pids_limit: 100
