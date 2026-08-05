@@ -1,0 +1,16 @@
+services:
+  vaultqr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vaultqr:latest
+    container_name: vaultqr
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      SIZE: "400"
+      MAX_SIZE: "1024"
+      SESSION_TTL_MINUTES: "30"
+      SECRET: ""
+    ports:
+      - "8010:8080"
