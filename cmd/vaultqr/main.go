@@ -53,7 +53,6 @@ type store struct {
 type pageData struct {
 	Content  string
 	ShowText bool
-	Image    string
 	Size     int
 }
 
@@ -496,7 +495,6 @@ func viewHandler(_ config, s *store) http.HandlerFunc {
 		data := pageData{
 			Content:  entry.Content,
 			ShowText: entry.ShowText,
-			Image:    "data:image/png;base64," + base64.StdEncoding.EncodeToString(png),
 			Size:     entry.Size,
 		}
 		if err := page.Execute(w, data); err != nil {
