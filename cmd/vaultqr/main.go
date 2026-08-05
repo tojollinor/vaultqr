@@ -10,8 +10,10 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"net"
 	"os"
 	"strconv"
+	"sync/atomic"
 	"strings"
 	"sync"
 	"time"
@@ -176,6 +178,48 @@ var page = template.Must(template.New("page").Parse(`<!doctype html>
 </body>
 </html>`))
 
+
+var requestCounter uint64
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	if r.status == 0 {
+		r.status = status
+	}
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *statusRecorder) Write(data []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	n, err := r.ResponseWriter.Write(data)
+	r.bytes += n
+	return n, err
+}
+
+func clientIP(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		if first, _, ok := strings.Cut(forwarded, ","); ok {
+			return strings.TrimSpace(first)
+		}
+		return forwarded
+	}
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+		return realIP
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
 func main() {
 	cfg := loadConfig()
 	s := &store{entries: make(map[string]qrEntry)}
@@ -200,8 +244,9 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	log.Printf("VaultQR startet auf Port %s, Standardgröße %d px, Maximalgröße %d px, Secret-Schutz: %t",
-		cfg.Port, cfg.DefaultSize, cfg.MaxSize, cfg.Secret != "")
+	log.Printf("START version=2 port=%s size=%d max_size=%d session_ttl=%s secret_enabled=%t",
+		cfg.Port, cfg.DefaultSize, cfg.MaxSize, cfg.SessionTTL, cfg.Secret != "")
+	log.Printf("ROUTES create=/ view=/view health=/healthz")
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
@@ -263,11 +308,13 @@ func createHandler(cfg config, s *store) http.HandlerFunc {
 
 		query := r.URL.Query()
 		if len(query) == 0 {
+			log.Printf("CREATE rejected reason=no_query")
 			http.Redirect(w, r, "/view", http.StatusSeeOther)
 			return
 		}
 
 		if cfg.Secret != "" && !secretMatches(cfg.Secret, query.Get("secret")) {
+			log.Printf("CREATE rejected reason=invalid_secret")
 			http.Error(w, "403 Forbidden", http.StatusForbidden)
 			return
 		}
@@ -281,6 +328,7 @@ func createHandler(cfg config, s *store) http.HandlerFunc {
 		}
 
 		if content == "" {
+			log.Printf("CREATE rejected reason=missing_content")
 			http.Error(w, "Parameter 'content' oder 'text' fehlt", http.StatusBadRequest)
 			return
 		}
@@ -289,12 +337,14 @@ func createHandler(cfg config, s *store) http.HandlerFunc {
 		if requested := strings.TrimSpace(query.Get("size")); requested != "" {
 			parsed, err := strconv.Atoi(requested)
 			if err != nil || parsed < 64 {
+				log.Printf("CREATE rejected reason=invalid_size supplied=%q", requested)
 				http.Error(w, "Ungültige Größe: mindestens 64 Pixel", http.StatusBadRequest)
 				return
 			}
 			size = parsed
 		}
 		if size > cfg.MaxSize {
+			log.Printf("CREATE rejected reason=size_too_large size=%d max_size=%d", size, cfg.MaxSize)
 			http.Error(w, fmt.Sprintf("Größe überschreitet MAX_SIZE=%d", cfg.MaxSize), http.StatusBadRequest)
 			return
 		}
@@ -304,6 +354,13 @@ func createHandler(cfg config, s *store) http.HandlerFunc {
 			http.Error(w, "Interner Fehler", http.StatusInternalServerError)
 			return
 		}
+
+		mode := "content"
+		if showText {
+			mode = "text"
+		}
+		log.Printf("CREATE accepted mode=%s size=%d content_length=%d ttl=%s",
+			mode, size, len(content), cfg.SessionTTL)
 
 		s.set(token, qrEntry{
 			Content:  content,
@@ -330,15 +387,29 @@ func viewHandler(_ config, s *store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie("vaultqr_session")
 		if err != nil {
+			log.Printf("VIEW rejected reason=missing_session_cookie")
 			http.Error(w, "Kein gültiger QR-Code-Aufruf vorhanden", http.StatusBadRequest)
 			return
 		}
 
 		entry, ok := s.get(cookie.Value)
-		if !ok || time.Now().After(entry.Expires) {
+		if !ok {
+			log.Printf("VIEW rejected reason=session_not_found")
+			http.Error(w, "QR-Code-Sitzung ist ungültig", http.StatusGone)
+			return
+		}
+		if time.Now().After(entry.Expires) {
+			log.Printf("VIEW rejected reason=session_expired")
 			http.Error(w, "QR-Code-Sitzung ist abgelaufen", http.StatusGone)
 			return
 		}
+
+		mode := "content"
+		if entry.ShowText {
+			mode = "text"
+		}
+		log.Printf("VIEW rendering mode=%s size=%d content_length=%d expires_in=%s",
+			mode, entry.Size, len(entry.Content), time.Until(entry.Expires).Round(time.Second))
 
 		png, err := qrcode.Encode(entry.Content, qrcode.Medium, entry.Size)
 		if err != nil {
@@ -405,20 +476,55 @@ func (s *store) cleanupLoop() {
 
 	for range ticker.C {
 		now := time.Now()
+		removed := 0
 		s.mu.Lock()
 		for token, entry := range s.entries {
 			if now.After(entry.Expires) {
 				delete(s.entries, token)
+				removed++
 			}
 		}
+		remaining := len(s.entries)
 		s.mu.Unlock()
+		if removed > 0 {
+			log.Printf("CLEANUP removed=%d remaining=%d", removed, remaining)
+		}
 	}
 }
 
 func requestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
-		log.Printf("%s %s von %s in %s", r.Method, r.URL.Path, r.RemoteAddr, time.Since(start))
+		id := atomic.AddUint64(&requestCounter, 1)
+		rec := &statusRecorder{ResponseWriter: w}
+
+		log.Printf(
+			"REQUEST start id=%d method=%s path=%s client=%s host=%s proto=%s forwarded_proto=%s user_agent=%q",
+			id,
+			r.Method,
+			r.URL.Path,
+			clientIP(r),
+			r.Host,
+			r.Proto,
+			r.Header.Get("X-Forwarded-Proto"),
+			r.UserAgent(),
+		)
+
+		next.ServeHTTP(rec, r)
+
+		status := rec.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+
+		log.Printf(
+			"REQUEST end id=%d status=%d bytes=%d duration=%s method=%s path=%s",
+			id,
+			status,
+			rec.bytes,
+			time.Since(start).Round(time.Microsecond),
+			r.Method,
+			r.URL.Path,
+		)
 	})
 }
