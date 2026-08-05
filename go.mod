@@ -1,4 +1,4 @@
-module github.com/itomi-de/vaultqr
+module github.com/tojollinor/vaultqr
 
 go 1.24
 

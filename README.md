@@ -1,70 +1,67 @@
 # VaultQR
 
-VaultQR erzeugt QR-Codes aus URL-Parametern und leitet danach auf die neutrale Adresse `/view` weiter.
+VaultQR **v1.0.1** generates QR codes from URL parameters and redirects to a neutral URL afterwards.
 
-## Verhalten
+## Behavior
 
-- `content=...` zeigt nur den QR-Code.
-- `text=...` zeigt QR-Code, Klartext und einen Kopieren-Button.
-- Nach dem ersten Aufruf erfolgt eine Weiterleitung auf `/view`.
-- Die Nutzdaten werden zeitlich begrenzt im Arbeitsspeicher gespeichert.
-- Ein zufälliges Sitzungstoken liegt in einem HttpOnly-Cookie.
-- Nach einem Container-Neustart sind bestehende Sitzungen nicht mehr verfügbar.
+- `content=...` shows only the QR code.
+- `text=...` shows the QR code, clear text and a copy button.
+- The browser is redirected to `/view`.
+- The QR image is served through `/image`.
+- Sessions exist only in memory and expire automatically.
+- Optional secret protection returns HTTP `403` for missing or incorrect secrets.
 
-## Umgebungsvariablen
+## Environment variables
 
-| Variable | Standard | Bedeutung |
+| Variable | Default | Description |
 |---|---:|---|
-| `PORT` | `8080` | interner HTTP-Port |
-| `SIZE` | `400` | Standardgröße ohne URL-Parameter |
-| `MAX_SIZE` | `1024` | maximal erlaubte Größe |
-| `SESSION_TTL_MINUTES` | `30` | Gültigkeit der neutralen Ansicht |
-| `SECRET` | leer | optionaler Zugriffsschutz |
+| `PORT` | `8080` | Internal HTTP port |
+| `SIZE` | `400` | Default QR size |
+| `MAX_SIZE` | `1024` | Maximum allowed QR size |
+| `SESSION_TTL_MINUTES` | `30` | Session lifetime |
+| `SECRET` | empty | Optional URL secret |
+| `LOG_LEVEL` | `normal` | `off`, `normal` or `debug` |
 
-## Beispiele
+## Logging
 
-Nur QR-Code:
+### `LOG_LEVEL=off`
+
+Logs startup information and errors only.
+
+### `LOG_LEVEL=normal`
+
+Additionally logs requests, status codes, duration, selected mode, QR size and payload length. The payload itself is not logged.
+
+### `LOG_LEVEL=debug`
+
+Additionally logs:
+
+- whether `content` or `text` was used,
+- the QR payload,
+- selected non-sensitive request metadata.
+
+Payload logging is limited to 500 characters. VaultQR never logs the configured secret, cookies, authorization headers or complete query strings.
+
+> Debug logging may expose sensitive QR payloads. Enable it only temporarily.
+
+## Examples
+
+QR only:
 
 ```text
-https://vault.example.de/qr/?content=Hallo
+https://vault.example.de/qr/?content=Hello
 ```
 
-QR-Code mit Klartext und Kopieren-Button:
+QR and visible text:
 
 ```text
-https://vault.example.de/qr/?text=Hallo
+https://vault.example.de/qr/?text=Hello
 ```
 
-Mit eigener Größe:
+With size and secret:
 
 ```text
-https://vault.example.de/qr/?text=Hallo&size=600
-```
-
-Mit Secret:
-
-```text
-https://vault.example.de/qr/?text=Hallo&secret=DEIN_SECRET
-```
-
-Nach erfolgreicher Verarbeitung steht im Browser nur noch:
-
-```text
-https://vault.example.de/qr/view
-```
-
-## Sicherheitshinweis
-
-Die Weiterleitung entfernt die Daten aus der sichtbaren Adresszeile. Der ursprüngliche Aufruf kann trotzdem im Browser-Verlauf oder in vorgelagerten Proxy-Logs auftauchen. VaultQR selbst protokolliert keine Query-Parameter.
-
-## Reverse Proxy
-
-Bei `handle_path /qr/*` wird `/qr` entfernt. Dadurch wird `/qr/view` intern zu `/view`.
-
-```caddy
-handle_path /qr/* {
-    reverse_proxy 10.1.1.7:8010
-}
+https://vault.example.de/qr/?text=Hello&size=600&secret=YOUR_SECRET
 ```
 
 ## Docker Compose
@@ -72,10 +69,7 @@ handle_path /qr/* {
 ```yaml
 services:
   vaultqr:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: vaultqr:latest
+    image: ghcr.io/tojollinor/vaultqr:latest
     container_name: vaultqr
     restart: unless-stopped
     environment:
@@ -84,10 +78,32 @@ services:
       MAX_SIZE: "1024"
       SESSION_TTL_MINUTES: "30"
       SECRET: ""
+      LOG_LEVEL: "normal"
     ports:
       - "8010:8080"
 ```
 
-## Lizenz
+## Reverse proxy under `/qr`
+
+The proxy must strip `/qr` before forwarding the request.
+
+```caddy
+handle_path /qr/* {
+    reverse_proxy 10.1.1.7:8010
+}
+```
+
+## Release 1.0.1
+
+After pushing the files, create and push the tag:
+
+```bash
+git tag v1.0.1
+git push origin v1.0.1
+```
+
+This publishes `ghcr.io/tojollinor/vaultqr:v1.0.1` through the included GitHub workflow.
+
+## License
 
 MIT

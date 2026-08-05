@@ -1,4 +1,3 @@
-
 package main
 
 import (
@@ -8,16 +7,26 @@ import (
 	"fmt"
 	"html/template"
 	"log"
-	"net/http"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
-	"sync/atomic"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	qrcode "github.com/skip2/go-qrcode"
+)
+
+const version = "1.0.1"
+
+type logLevel uint8
+
+const (
+	logOff logLevel = iota
+	logNormal
+	logDebug
 )
 
 type config struct {
@@ -26,6 +35,7 @@ type config struct {
 	DefaultSize int
 	MaxSize     int
 	SessionTTL  time.Duration
+	LogLevel    logLevel
 }
 
 type qrEntry struct {
@@ -177,8 +187,68 @@ var page = template.Must(template.New("page").Parse(`<!doctype html>
 </body>
 </html>`))
 
+var (
+	requestCounter uint64
+	activeLogLevel = logNormal
+)
 
-var requestCounter uint64
+func parseLogLevel(value string) logLevel {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "off":
+		return logOff
+	case "debug":
+		return logDebug
+	case "", "normal":
+		return logNormal
+	default:
+		log.Printf("WARN invalid_log_level=%q fallback=normal", value)
+		return logNormal
+	}
+}
+
+func logLevelName(level logLevel) string {
+	switch level {
+	case logOff:
+		return "off"
+	case logDebug:
+		return "debug"
+	default:
+		return "normal"
+	}
+}
+
+func logNormalf(format string, args ...any) {
+	if activeLogLevel >= logNormal {
+		log.Printf(format, args...)
+	}
+}
+
+func logDebugf(format string, args ...any) {
+	if activeLogLevel >= logDebug {
+		log.Printf(format, args...)
+	}
+}
+
+func logErrorf(format string, args ...any) {
+	log.Printf("ERROR "+format, args...)
+}
+
+func logDebugContent(mode, content string) {
+	if activeLogLevel < logDebug {
+		return
+	}
+
+	const maxLength = 500
+	display := content
+	truncated := false
+	if len(display) > maxLength {
+		display = display[:maxLength]
+		truncated = true
+	}
+
+	log.Printf("REQUEST_DATA mode=%s content=%q content_length=%d truncated=%t",
+		mode, display, len(content), truncated)
+}
 
 type statusRecorder struct {
 	http.ResponseWriter
@@ -221,6 +291,7 @@ func clientIP(r *http.Request) string {
 
 func main() {
 	cfg := loadConfig()
+	activeLogLevel = cfg.LogLevel
 	s := &store{entries: make(map[string]qrEntry)}
 
 	go s.cleanupLoop()
@@ -244,9 +315,10 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	log.Printf("START version=2 port=%s size=%d max_size=%d session_ttl=%s secret_enabled=%t",
-		cfg.Port, cfg.DefaultSize, cfg.MaxSize, cfg.SessionTTL, cfg.Secret != "")
-	log.Printf("ROUTES create=/ view=/view image=/image health=/healthz")
+	log.Printf("START version=%s port=%s size=%d max_size=%d session_ttl=%s secret_enabled=%t log_level=%s",
+		version, cfg.Port, cfg.DefaultSize, cfg.MaxSize, cfg.SessionTTL,
+		cfg.Secret != "", logLevelName(cfg.LogLevel))
+	logNormalf("ROUTES create=/ view=/view image=/image health=/healthz")
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
@@ -283,6 +355,7 @@ func loadConfig() config {
 		DefaultSize: defaultSize,
 		MaxSize:     maxSize,
 		SessionTTL:  time.Duration(ttlMinutes) * time.Minute,
+		LogLevel:    parseLogLevel(os.Getenv("LOG_LEVEL")),
 	}
 }
 
@@ -308,13 +381,13 @@ func createHandler(cfg config, s *store) http.HandlerFunc {
 
 		query := r.URL.Query()
 		if len(query) == 0 {
-			log.Printf("CREATE rejected reason=no_query")
+			logErrorf("CREATE rejected reason=no_query")
 			http.Redirect(w, r, "view", http.StatusSeeOther)
 			return
 		}
 
 		if cfg.Secret != "" && !secretMatches(cfg.Secret, query.Get("secret")) {
-			log.Printf("CREATE rejected reason=invalid_secret")
+			logErrorf("CREATE rejected reason=invalid_secret")
 			http.Error(w, "403 Forbidden", http.StatusForbidden)
 			return
 		}
@@ -328,7 +401,7 @@ func createHandler(cfg config, s *store) http.HandlerFunc {
 		}
 
 		if content == "" {
-			log.Printf("CREATE rejected reason=missing_content")
+			logErrorf("CREATE rejected reason=missing_content")
 			http.Error(w, "Parameter 'content' oder 'text' fehlt", http.StatusBadRequest)
 			return
 		}
@@ -337,14 +410,14 @@ func createHandler(cfg config, s *store) http.HandlerFunc {
 		if requested := strings.TrimSpace(query.Get("size")); requested != "" {
 			parsed, err := strconv.Atoi(requested)
 			if err != nil || parsed < 64 {
-				log.Printf("CREATE rejected reason=invalid_size supplied=%q", requested)
+				logErrorf("CREATE rejected reason=invalid_size supplied=%q", requested)
 				http.Error(w, "Ungültige Größe: mindestens 64 Pixel", http.StatusBadRequest)
 				return
 			}
 			size = parsed
 		}
 		if size > cfg.MaxSize {
-			log.Printf("CREATE rejected reason=size_too_large size=%d max_size=%d", size, cfg.MaxSize)
+			logErrorf("CREATE rejected reason=size_too_large size=%d max_size=%d", size, cfg.MaxSize)
 			http.Error(w, fmt.Sprintf("Größe überschreitet MAX_SIZE=%d", cfg.MaxSize), http.StatusBadRequest)
 			return
 		}
@@ -359,8 +432,9 @@ func createHandler(cfg config, s *store) http.HandlerFunc {
 		if showText {
 			mode = "text"
 		}
-		log.Printf("CREATE accepted mode=%s size=%d content_length=%d ttl=%s",
+		logNormalf("CREATE accepted mode=%s size=%d content_length=%d ttl=%s",
 			mode, size, len(content), cfg.SessionTTL)
+		logDebugContent(mode, content)
 
 		s.set(token, qrEntry{
 			Content:  content,
@@ -387,19 +461,19 @@ func viewHandler(_ config, s *store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie("vaultqr_session")
 		if err != nil {
-			log.Printf("VIEW rejected reason=missing_session_cookie")
+			logErrorf("VIEW rejected reason=missing_session_cookie")
 			http.Error(w, "Kein gültiger QR-Code-Aufruf vorhanden", http.StatusBadRequest)
 			return
 		}
 
 		entry, ok := s.get(cookie.Value)
 		if !ok {
-			log.Printf("VIEW rejected reason=session_not_found")
+			logErrorf("VIEW rejected reason=session_not_found")
 			http.Error(w, "QR-Code-Sitzung ist ungültig", http.StatusGone)
 			return
 		}
 		if time.Now().After(entry.Expires) {
-			log.Printf("VIEW rejected reason=session_expired")
+			logErrorf("VIEW rejected reason=session_expired")
 			http.Error(w, "QR-Code-Sitzung ist abgelaufen", http.StatusGone)
 			return
 		}
@@ -408,7 +482,7 @@ func viewHandler(_ config, s *store) http.HandlerFunc {
 		if entry.ShowText {
 			mode = "text"
 		}
-		log.Printf("VIEW rendering mode=%s size=%d content_length=%d expires_in=%s",
+		logNormalf("VIEW rendering mode=%s size=%d content_length=%d expires_in=%s",
 			mode, entry.Size, len(entry.Content), time.Until(entry.Expires).Round(time.Second))
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -426,36 +500,35 @@ func viewHandler(_ config, s *store) http.HandlerFunc {
 			Size:     entry.Size,
 		}
 		if err := page.Execute(w, data); err != nil {
-			log.Printf("Template-Ausgabe fehlgeschlagen: %v", err)
+			logErrorf("template_output_failed error=%q", err)
 		}
 	}
 }
-
 
 func imageHandler(s *store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie("vaultqr_session")
 		if err != nil {
-			log.Printf("IMAGE rejected reason=missing_session_cookie")
+			logErrorf("IMAGE rejected reason=missing_session_cookie")
 			http.Error(w, "Kein gültiger QR-Code-Aufruf vorhanden", http.StatusBadRequest)
 			return
 		}
 
 		entry, ok := s.get(cookie.Value)
 		if !ok {
-			log.Printf("IMAGE rejected reason=session_not_found")
+			logErrorf("IMAGE rejected reason=session_not_found")
 			http.Error(w, "QR-Code-Sitzung ist ungültig", http.StatusGone)
 			return
 		}
 		if time.Now().After(entry.Expires) {
-			log.Printf("IMAGE rejected reason=session_expired")
+			logErrorf("IMAGE rejected reason=session_expired")
 			http.Error(w, "QR-Code-Sitzung ist abgelaufen", http.StatusGone)
 			return
 		}
 
 		png, err := qrcode.Encode(entry.Content, qrcode.Medium, entry.Size)
 		if err != nil {
-			log.Printf("IMAGE failed reason=qr_encode error=%q", err)
+			logErrorf("IMAGE failed reason=qr_encode error=%q", err)
 			http.Error(w, "QR-Code konnte nicht erzeugt werden", http.StatusInternalServerError)
 			return
 		}
@@ -467,12 +540,12 @@ func imageHandler(s *store) http.HandlerFunc {
 			w.Header().Set("Content-Disposition", `attachment; filename="vaultqr.png"`)
 		}
 
-		log.Printf("IMAGE served size=%d bytes=%d download=%t",
+		logNormalf("IMAGE served size=%d bytes=%d download=%t",
 			entry.Size, len(png), r.URL.Query().Get("download") == "1")
 
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write(png); err != nil {
-			log.Printf("IMAGE write_failed error=%q", err)
+			logErrorf("IMAGE write_failed error=%q", err)
 		}
 	}
 }
@@ -526,7 +599,7 @@ func (s *store) cleanupLoop() {
 		remaining := len(s.entries)
 		s.mu.Unlock()
 		if removed > 0 {
-			log.Printf("CLEANUP removed=%d remaining=%d", removed, remaining)
+			logNormalf("CLEANUP removed=%d remaining=%d", removed, remaining)
 		}
 	}
 }
@@ -537,7 +610,7 @@ func requestLogger(next http.Handler) http.Handler {
 		id := atomic.AddUint64(&requestCounter, 1)
 		rec := &statusRecorder{ResponseWriter: w}
 
-		log.Printf(
+		logNormalf(
 			"REQUEST start id=%d method=%s path=%s client=%s host=%s proto=%s forwarded_proto=%s user_agent=%q",
 			id,
 			r.Method,
@@ -548,6 +621,13 @@ func requestLogger(next http.Handler) http.Handler {
 			r.Header.Get("X-Forwarded-Proto"),
 			r.UserAgent(),
 		)
+		logDebugf("REQUEST_META id=%d referer=%q accept=%q forwarded_for=%q real_ip=%q",
+			id,
+			r.Referer(),
+			r.Header.Get("Accept"),
+			r.Header.Get("X-Forwarded-For"),
+			r.Header.Get("X-Real-IP"),
+		)
 
 		next.ServeHTTP(rec, r)
 
@@ -556,7 +636,7 @@ func requestLogger(next http.Handler) http.Handler {
 			status = http.StatusOK
 		}
 
-		log.Printf(
+		logNormalf(
 			"REQUEST end id=%d status=%d bytes=%d duration=%s method=%s path=%s",
 			id,
 			status,
