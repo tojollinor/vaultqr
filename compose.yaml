@@ -3,9 +3,10 @@ services:
     image: ghcr.io/tojollinor/vaultqr:latest
     container_name: vaultqr
     restart: unless-stopped
-    environment:
     ports:
       - "8010:8080"
+
+    environment:
 
       # Interner HTTP-Port im Container
       # PORT: "8080"
